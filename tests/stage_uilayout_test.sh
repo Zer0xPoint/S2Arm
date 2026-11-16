@@ -77,6 +77,11 @@ ck "⑨ 原版换了、构建号与工具都没变 → 重新生成：a.zs = v7:
 b=$(c); o=$(S 2>&1); r=$?
 ck "⑨ 再跑 → 跳过、现行不动" '[ $r = 0 ] && [ "$(c)" = "$b" ] && [[ "$o" == *跳过* ]]'
 ck "②–⑨ 产物根 romfs 一直是 ① 那份原版身份（$(readlink "$(c)/romfs")）、内容原版" '[ "$(readlink "$(c)/romfs")" = "$RL1" ] && [ "$(base a.zs)" = orig-a ] && [ "$(base b.zs)" = orig-b ]'
+# ⑪ 覆盖层形态、上一版清单有 b.zs 这一版不覆盖，而底下 RomFS 的 b.zs 与原版不同（drift-b，别处就地改过 / 原版目录播种后变过）
+#   → 读到原版 orig-b（原版放进覆盖层、记进清单，同 Windows；旧脚本就地恢复读到的也是 orig-b）
+v=$(c); chmod -R u+w "$(cd -P "$v/romfs" && pwd)"; printf drift-b > "$v/romfs/Layout/b.zs"; printf 'Layout/a.zs\nLayout/b.zs\n' > "$v/ui_overlay.tsv"; echo stale > "$v/.stage_uilayout"
+o=$(S 2>&1); r=$?
+ck "⑪ 底下与原版不同的上一版文件 → 读到原版 orig-b（$(rd b.zs)）、清单 a + b、a.zs 照覆盖（$(rd a.zs)）" '[ $r = 0 ] && [ "$(rd b.zs)" = orig-b ] && [ "$(cat "$(c)/ui_overlay.tsv" | tr "\n" " ")" = "Layout/a.zs Layout/b.zs " ] && [ "$(rd a.zs)" = v7:new-a ]'
 # ⑩ 镜像形态：现行只有 romfs.std（同一份原版建的标准 RomFS，LibHac；去掉 Layout/c.zs，好核「镜像没有的覆盖文件跳过」）
 export DOTNET_ROOT=${DOTNET_ROOT:-$HOME/.dotnet}; export PATH=$DOTNET_ROOT:$PATH
 if command -v dotnet > /dev/null; then

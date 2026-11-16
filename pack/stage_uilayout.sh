@@ -60,28 +60,37 @@ if [ -n "$LEGACY" ]; then W=$(ROOT_OWN_ROMFS=1 root_begin "$G" "$TAG") || exit 1
 PREV=$(grep -v '^$' "$W/ui_overlay.tsv" 2>/dev/null)
 WL=; [ -n "$PREV" ] && [ ! -d "$W/ui_overlay" ] && [ -d "$W/romfs" ] && WL=1
 [ "$WL" = "$LEGACY" ] || { root_abort "$G" "$TAG"; echo "【红】$G 现行在开工前换了形态（就地改 / 覆盖层），重跑本阶段"; exit 1; }
-# 「RomFS 里有」按目录或镜像核（graphics/nvn/tools/romfs_list.py image_of：目录不在、旁边有 romfs.std 就看镜像），原版与这次的产物根都要有
-miss=$(printf '%s\n%s\n' "$FL" "$PREV" | grep -v '^$' | /usr/bin/python3 -c 'import os, sys
+# 「RomFS 里有」与读字节按目录或镜像（graphics/nvn/tools/romfs_list.py image_of：目录不在、旁边有 romfs.std 就看镜像），原版与这次的产物根都要有
+RF='import os, sys
 sys.path[:0] = [sys.argv[1], sys.argv[2]]; import romfs_list
-def has(top):
+def rom(top):
+    """(在不在, 读字节)"""
     img = romfs_list.image_of(top)
-    if img is None: return lambda r: os.path.isfile(os.path.join(top, r))
-    from romfs_img import RomfsImage; im = RomfsImage(img); return lambda r: r in im
-o, b = has(sys.argv[3]), has(sys.argv[4])
-for r in sys.stdin.read().splitlines(): o(r) and b(r) or print(r)' "$R/graphics/nvn/tools" "$R/pack" "$ORIG" "$W/romfs") || { root_abort "$G" "$TAG"; echo "【红】$G 核不了覆盖文件在不在 RomFS 里"; exit 1; }
+    if img is None: return (lambda r: os.path.isfile(os.path.join(top, r))), (lambda r: open(os.path.join(top, r), "rb").read())
+    from romfs_img import RomfsImage; im = RomfsImage(img); return (lambda r: r in im), im.read
+(o, ro), (b, rb) = rom(sys.argv[3]), rom(sys.argv[4])
+rels = sys.stdin.read().splitlines()'
+miss=$(printf '%s\n%s\n' "$FL" "$PREV" | grep -v '^$' | /usr/bin/python3 -c "$RF
+for r in rels: o(r) and b(r) or print(r)" "$R/graphics/nvn/tools" "$R/pack" "$ORIG" "$W/romfs") || { root_abort "$G" "$TAG"; echo "【红】$G 核不了覆盖文件在不在 RomFS 里"; exit 1; }
 # 宽屏是画质项，不挡出包（10-26 维护者）：原版 / 这次的产物根里没有的文件打黄、不覆盖也不恢复（只许替换），其余照做
 if [ -n "$miss" ]; then
   echo "【黄】$G 宽屏布局：原版 romfs 没有 $(printf '%s\n' "$miss" | wc -l | tr -d ' ') 个覆盖 / 上一版清单里的文件，跳过：$(echo "$miss" | head -3 | tr '\n' ' ')"
   FL=$(printf '%s\n' "$FL" | grep -v '^$' | grep -vxF -- "$miss"); PREV=$(printf '%s\n' "$PREV" | grep -v '^$' | grep -vxF -- "$miss")
 fi
-# 上一版覆盖过、这一版不覆盖的文件：回到原版（覆盖层整份重建，不再列它；旧形态在下面换回 RomFS 里的原版）
+# 上一版覆盖过、这一版不覆盖的文件：恢复成原版。旧形态在 RomFS 里换回原版；覆盖层形态底下 RomFS 与原版字节不同的（别处就地改过、或播种后原版目录变过）
+#   把原版放进覆盖层、记进清单（同 Windows pack/orch/stages.py _uilayout restore），读到的与原先「就地恢复原版」相同；相同的不进覆盖层
 RST=$(printf '%s\n' "$PREV" | grep -v '^$' | while read -r f; do printf '%s\n' "$FL" | grep -qxF -- "$f" || echo "$f"; done)
-n=0; m=$(printf '%s\n' "$RST" | grep -c .)
+n=0; m=$(printf '%s\n' "$RST" | grep -c .); RSO=
 if [ -n "$LEGACY" ]; then
   while read -r f; do [ -n "$f" ] || continue; rm -f "$W/romfs/$f" && _root_cp "$ORIG/$f" "$W/romfs/$f" || { root_abort "$G" "$TAG"; echo "【红】恢复原版 $f 失败"; exit 1; }; done <<< "$PREV"
+elif [ -n "$RST" ]; then
+  RSO=$(printf '%s\n' "$RST" | /usr/bin/python3 -c "$RF
+for r in rels: ro(r) == rb(r) or print(r)" "$R/graphics/nvn/tools" "$R/pack" "$ORIG" "$W/romfs") || { root_abort "$G" "$TAG"; echo "【红】$G 比不了上一版覆盖文件与原版"; exit 1; }
 fi
 _root_rm "$W/ui_overlay" || { root_abort "$G" "$TAG"; echo "【红】清旧覆盖层失败"; exit 1; }
 while read -r f; do [ -n "$f" ] || continue; mkdir -p "$(dirname "$W/ui_overlay/romfs/$f")" && _root_cp "$OV/romfs/$f" "$W/ui_overlay/romfs/$f" || { root_abort "$G" "$TAG"; echo "【红】覆盖 $f 失败"; exit 1; }; n=$((n + 1)); done < <(printf '%s\n' "$FL")
+while read -r f; do [ -n "$f" ] || continue; mkdir -p "$(dirname "$W/ui_overlay/romfs/$f")" && _root_cp "$ORIG/$f" "$W/ui_overlay/romfs/$f" || { root_abort "$G" "$TAG"; echo "【红】恢复原版 $f 失败"; exit 1; }; done < <(printf '%s\n' "$RSO")
+FL=$(printf '%s\n%s\n' "$FL" "$RSO" | grep -v '^$' | LC_ALL=C sort -u)
 # 读到的 RomFS 变了，RomFS 索引要重出（索引按覆盖层的大小建，pack/stages/romfsidx.sh）
 # 旧索引 romfs.s2aidx 同一次提交里删掉（10-21 帧率能耗线实证：只删 .stage_romfsidx 时，本阶段提交到索引阶段重出之间的几分钟里现行根「索引记 868 字节、文件已是 871 字节」，
 #   这期间起的 Mac 局读该文件空指针崩）。没有索引时宿主按目录现建（慢但对），索引阶段随后重出
