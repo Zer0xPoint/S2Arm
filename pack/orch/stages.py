@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -398,6 +399,42 @@ def romfsidx_key(current):
     return digest(f'{h.hexdigest()[:16]} {kt}')
 
 
+BUILD_PROPS = ('directory.build.props', 'directory.build.targets', 'directory.packages.props', 'global.json', 'nuget.config')
+
+
+def build_identity(project):
+    """.NET 工程的源码内容身份（12 位）：沿 ProjectReference 收齐闭包里的工程，每个工程目录下全部文件（跳过 bin / obj）按「仓库相对路径 + 字节」喂 SHA-256，
+    再加各工程目录到仓库根之间的 Directory.Build.* / Directory.Packages.props / global.json / NuGet.config（包版本、编译选项）。不用 git：玩家机的引擎快照不是 git 仓库"""
+    projects, todo = set(), [Path(project).resolve()]
+    while todo:
+        p = todo.pop()
+        if p in projects:
+            continue
+        projects.add(p)
+        todo.extend((p.parent / ref.replace('\\', '/')).resolve()
+                    for ref in re.findall(r'<ProjectReference\s+Include="([^"]+)"', p.read_text(encoding='utf-8-sig')))
+    repo, files = REPO.resolve(), set()
+    for p in projects:
+        files.update(_source_files(p.parent))
+        for d in (p.parent, *p.parent.parents):
+            if d == repo.parent:
+                break
+            files.update(f for f in d.iterdir() if f.is_file() and f.name.lower() in BUILD_PROPS)
+    h = hashlib.sha256(b'build-identity-v1\0')
+    for f in sorted(files, key=lambda f: f.relative_to(repo).as_posix()):
+        h.update(f.relative_to(repo).as_posix().encode() + b'\0' + f.read_bytes() + b'\0')
+    return h.hexdigest()[:12]
+
+
+def _source_files(top):
+    """工程目录下的源文件（跳过编译产物 bin / obj，任意层）"""
+    out = []
+    for directory, dirs, names in os.walk(top):
+        dirs[:] = [d for d in dirs if d.lower() not in ('bin', 'obj')]
+        out.extend(Path(directory) / n for n in names)
+    return out
+
+
 def overlay_sizes(version):
     """界面布局覆盖层 <版本>/ui_overlay/romfs/<路径> → {RomFS 相对路径: 字节数}（读方按「覆盖层优先」叠在 romfs/ 上；没有覆盖层 → 空）"""
     layer = Path(version) / 'ui_overlay' / 'romfs'
@@ -415,7 +452,14 @@ class Stages:
         target = w / 'romfs.s2aidx'
         target.unlink(missing_ok=True)
         listing = deps.work / 'romfs-list.tsv'
-        deps.python('graphics/nvn/tools/romfs_list.py', 'sizes', w / 'romfs', listing, log=w / 'romfs_index.log')
+        # 清单同 romfs_list.py sizes（盘点顺序、普通文件 lstat 大小），在本进程里写：原先为它另起一个 Python 进程（11-16 出包轻阶段定因）
+        tree = module('graphics/nvn/tools/romfs_list.py', '_orch_romfs_list').scan(w / 'romfs')
+        bad = [(rel, err) for rel, err in tree.errors.items()] + [(e.rel, e.lstat_error) for e in tree.entries if e.lstat_error is not None]
+        if bad:
+            raise StageError(f'RomFS 索引清单：读不开 {bad[0][0] or tree.top}：{bad[0][1]}')
+        with open(listing, 'w', encoding='utf-8', errors='surrogateescape', newline='\n') as f:
+            f.writelines(f'{e.lstat.st_size}\t{e.rel}\n' for e in tree.entries if stat.S_ISREG(e.lstat.st_mode))
+        text(w / 'romfs_index.log', '')
         over = overlay_sizes(w)
         if over:   # 覆盖层优先：索引只认路径与大小（RomFsIndex --list 用 SizeOnlyFile），覆盖文件换成覆盖层那份的大小
             rows = listing.read_text(encoding='utf-8').splitlines()
@@ -435,21 +479,42 @@ class Stages:
             dotnet = os.environ.get('DOTNET') or shutil.which('dotnet')
             if not dotnet:
                 raise StageError('winenv：缺 .NET 命令；不下载', 75)
-            # --no-restore avoids implicit NuGet/network downloads; missing
-            # restored inputs are an explicit environment failure.
-            dll = REPO / 'services/romfs_index/bin/Release/net10.0/romfs_index.dll'
-            try:
-                run([dotnet, 'build', REPO / 'services/romfs_index', '-c', 'Release',
-                     '-nologo', '-v', 'q', '--no-restore', '-m:2', '-nr:false',
-                     '-p:UseSharedCompilation=false'], env=deps.env, log=w / 'romfs_index_build.log', timeout=300)
-            except StageError as error:
-                raise StageError('winenv：RomFS 索引构建/已还原依赖未就绪；未运行旧 DLL', 75) from error
+            dll = self._index_tool(dotnet, deps, w / 'romfs_index_build.log')
             if not dll.is_file():
                 raise StageError('winenv：缺本次指定的 romfs_index.dll', 75)
             cmd = [dotnet, dll]
         run([*cmd, w, '--list', listing], env=deps.env, log=w / 'romfs_index_core.log')
         if not target.is_file() or target.stat().st_size == 0:
             raise StageError('RomFS 索引为空，拒绝提交')
+
+    def _index_tool(self, dotnet, deps, log):
+        """源码现编的 RomFS 索引工具：按构建闭包的源码内容身份编一次，放 <S2A_RUN_ROOT>/s2arm/bin/romfs_index_<身份>/，同身份复用（同 _nxu）。
+        原先每次都在仓库树里 dotnet build：工程引用整个服务层（26 个工程），已编过的树增量检查也要十几秒，Windows 出包机道每单新建工作树、每单全量编半分钟以上（11-16 出包轻阶段定因）。
+        身份 = 闭包里每个工程目录的全部源文件（不含 bin / obj）+ 上级目录的 Directory.* / global.json / NuGet.config：改了任何一处就重编，不会拿旧的顶上"""
+        project = REPO / 'services/romfs_index'
+        dest = self._run_root() / 's2arm/bin' / ('romfs_index_' + build_identity(project / 'romfs_index.csproj'))
+        if (dest / 'romfs_index.dll').is_file() and not is_link(dest):
+            text(log, f'复用 {dest}\n')
+            return dest / 'romfs_index.dll'
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=dest.name + '.tmp.', dir=dest.parent) as temporary:
+            output = Path(temporary) / 'build'
+            # --no-restore avoids implicit NuGet/network downloads; missing
+            # restored inputs are an explicit environment failure.
+            try:
+                run([dotnet, 'build', project, '-c', 'Release', '-o', output,
+                     '-nologo', '-v', 'q', '--no-restore', '-m:2', '-nr:false',
+                     '-p:UseSharedCompilation=false'], env=deps.env, log=log, timeout=300)
+            except StageError as error:
+                raise StageError('winenv：RomFS 索引构建/已还原依赖未就绪；未运行旧 DLL', 75) from error
+            if not (output / 'romfs_index.dll').is_file():
+                raise StageError('winenv：缺本次指定的 romfs_index.dll', 75)
+            try:
+                output.rename(dest)
+            except OSError as error:   # 别的作业同时编好了同一身份：用它的
+                if error.errno not in (errno.EEXIST, errno.ENOTEMPTY, errno.EACCES) or is_link(dest) or not (dest / 'romfs_index.dll').is_file():
+                    raise
+        return dest / 'romfs_index.dll'
 
     def _direct_profile(self, tx, deps, plan):
         w = tx.path
@@ -1336,7 +1401,7 @@ class Stages:
                         return self._light_commit(tx, 'aoc', start, None, ('aoc.log',))
                     remove_owned(tx.path / 'aoc')
                     if (source / 'aoc').is_dir():
-                        self.roots._copy_tree(source / 'aoc', tx.path / 'aoc')
+                        self.roots._copy_tree(source / 'aoc', tx.path / 'aoc', hardlink=True)   # 缓存同样不原地改（roots.SHARED_TREES）
                     (tx.path / 'aoc.tsv').unlink(missing_ok=True)
                     copy_file(source / 'aoc.tsv', tx.path / 'aoc.tsv')
                     deps.save(tx.path, base)

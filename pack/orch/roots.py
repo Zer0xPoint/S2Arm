@@ -214,7 +214,7 @@ def links_supported(path):
     return fs.value.upper() in ('NTFS', 'REFS')
 
 
-def copy_file(source, dest, link_ok=False):
+def copy_file(source, dest, link_ok=False, refs=None):
     """克隆优先（Mac clonefile / Linux FICLONE / Windows ReFS 块克隆，写时复制）；都没有时实拷。
     link_ok（#291，只给播种 RomFS 用）：Windows 上同卷非 ReFS（NTFS）先建硬链接，不逐文件实拷——RomFS 按设计不可变（没有阶段原地改它，
     门禁机上还封成拒写），写单一 IMG 时边写边腾删的是产物根里的这个名字，共用解包目录里的那份数据不受影响。
@@ -244,7 +244,8 @@ def copy_file(source, dest, link_ok=False):
                 print(f'【黄】块克隆不可用：实拷 {source.name}', file=sys.stderr)
                 shutil.copyfileobj(src, dst, 1024 * 1024)
                 cloned = True
-    if not cloned and refs_same_volume(source, dest):
+    # refs：调用方已按整棵树判过「同一 ReFS 卷」就直接给（_copy_tree）；None = 这一个文件现判（每个文件两次 realpath + 两次查卷，11-16 出包轻阶段定因）
+    if not cloned and (refs_same_volume(source, dest) if refs is None else refs):
         class Params(C.Structure):
             _fields_ = [('size', W.DWORD), ('flags', W.DWORD),
                         ('cancel', C.c_void_p), ('progress', C.c_void_p), ('context', C.c_void_p)]
@@ -450,6 +451,11 @@ def process_start(pid):
     return ' '.join(r.stdout.split())
 
 
+# 各版本共用、没有阶段原地改的数据目录（追加内容：只由 aoc 阶段整目录换掉）：阶段事务克隆现行时 Windows 上建硬链接，不逐个克隆
+#   （11-16 出包轻阶段定因：带 DLC 的款每个阶段事务都把几千个 DLC 文件逐个块克隆 + 设权限一遍，一款 7095 个文件每个阶段 6–30 秒）
+SHARED_TREES = ('aoc',)
+
+
 class Roots:
     def __init__(self, path=None, *, shared=None, repo=REPO):
         run = Path(os.environ.get('S2A_RUN_ROOT', Path.home() / '.s2arm/run')) / 's2arm'
@@ -630,7 +636,7 @@ class Roots:
                 else:
                     directory_link(target, dest / 'romfs', relative=f'../.romfs_store/{game}/{target.name}')
             elif p.is_dir():
-                self._copy_tree(p, dest / p.name)
+                self._copy_tree(p, dest / p.name, hardlink=p.name in SHARED_TREES)
             else:
                 copy_file(p, dest / p.name)
         if not own_romfs and (dest / 'romfs').is_dir() and not target and sealing():
@@ -638,16 +644,32 @@ class Roots:
         self._resource('--root-clone', source, dest, env=env)
         self._shards(dest, '克隆现行(root_begin)', env=env)
 
-    def _copy_tree(self, source, dest, tick=None, link_ok=False):
+    def _copy_tree(self, source, dest, tick=None, link_ok=False, hardlink=False):
+        """hardlink（只给 SHARED_TREES 里各版本共用、不原地改的数据）：Windows 上逐个文件先建硬链接（同一份数据，不克隆、不改属性），建不了（跨卷、FAT 类卷）
+        这一棵余下的照常 copy_file。Mac / Linux 照旧克隆"""
         if is_link(source):
             raise UnsafeRoot('克隆拒绝未批准的链接')
         dest.mkdir(parents=True)
+        # 卷只判一次（11-16 出包轻阶段定因：每个阶段事务克隆现行，追加内容 7095 个文件逐个判卷，每个文件两次 realpath + 两次查卷）：
+        #   plain_entries 已拒绝树里的一切重解析点（链接 / 联接 / 挂载点），整棵源树与源根同卷；目标树是这里新建的子目录，与目标根同卷
+        refs = None
         for p in plain_entries(source):
             output = dest / p.relative_to(source)
             if p.is_dir():
                 output.mkdir(parents=True, exist_ok=True)
             else:
-                copy_file(p, output, link_ok=link_ok)
+                if hardlink and os.name == 'nt':
+                    try:
+                        os.link(long_path(str(p)), long_path(str(output)))
+                        if tick:
+                            tick()
+                        continue
+                    except OSError as error:
+                        print(f'【黄】硬链接不可用（{error.strerror or error}）：{source.name} 照常克隆', file=sys.stderr)
+                        hardlink = False
+                if refs is None:
+                    refs = refs_same_volume(source, dest / p.name)   # 判的是 source 与 dest 两个目录所在的卷（refs_same_volume 取目标的上一级）
+                copy_file(p, output, link_ok=link_ok, refs=refs)
                 if tick:
                     tick()
 

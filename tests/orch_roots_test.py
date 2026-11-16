@@ -265,6 +265,74 @@ class RootsTest(unittest.TestCase):
         self.assertFalse(os.path.samefile(src, self.home / 'fallback'))
         self.assertIn('硬链接不可用', out)
 
+    def test_copy_tree_judges_volume_once_per_tree(self):
+        # 11-16 出包轻阶段：每个阶段事务克隆现行，追加内容几千个文件原先逐个判「同一 ReFS 卷」（每个文件两次 realpath + 两次查卷）。
+        #   期望手写：一棵 3 个文件、2 层子目录的树 → 判卷 1 次，判的是源根与目标根，判出的结果交给每个文件；字节逐个相同；
+        #   只有空目录的树 → 0 次；单个文件不给 refs 照旧自己判 1 次，给了 refs=False 不判
+        src = self.home / 'aoc-src'
+        (src / '1/sub').mkdir(parents=True); (src / 'empty').mkdir()
+        files = {'a.bin': b'A' * 3, '1/b.bin': b'B' * 5, '1/sub/c.bin': b'C' * 7}
+        for rel, data in files.items():
+            (src / rel).write_bytes(data)
+        judge = Mock(return_value=False)
+        with patch.object(roots.sys, 'platform', 'win32'), patch.object(roots, 'refs_same_volume', judge), \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.store._copy_tree(src, self.home / 'aoc-dst')
+            self.assertEqual(judge.call_count, 1)
+            self.assertEqual(judge.call_args.args[0], src)
+            self.assertEqual(Path(judge.call_args.args[1]).parent, self.home / 'aoc-dst')
+            for rel, data in files.items():
+                self.assertEqual((self.home / 'aoc-dst' / rel).read_bytes(), data)
+            self.assertTrue((self.home / 'aoc-dst/empty').is_dir())
+            judge.reset_mock()
+            (self.home / 'only-dirs/x/y').mkdir(parents=True)
+            self.store._copy_tree(self.home / 'only-dirs', self.home / 'only-dirs-copy')
+            self.assertEqual(judge.call_count, 0)
+            roots.copy_file(src / 'a.bin', self.home / 'single')
+            self.assertEqual(judge.call_count, 1)
+            roots.copy_file(src / 'a.bin', self.home / 'single2', refs=False)
+            self.assertEqual(judge.call_count, 1)
+        self.assertEqual((self.home / 'single2').read_bytes(), b'AAA')
+
+    def test_shared_trees_hardlinked_on_windows_and_fall_back_to_copy(self):
+        # 11-16 出包轻阶段：追加内容（aoc）各版本共用、不原地改，阶段事务克隆现行时 Windows 上逐个建硬链接，不逐个块克隆。
+        #   期望手写：① 阶段事务克隆现行：aoc 走硬链接、exefs 不走；② Windows 下硬链接树：每个文件与源同一个文件、空目录照建、不调 copy_file；
+        #   ③ 硬链接建不了（FAT 类卷）：说一句黄、这一棵全部照常 copy_file（3 个文件 3 次），字节相同、与源不是同一个文件
+        tx = self.store.begin('原创', 'with-aoc')
+        (tx.path / 'exefs').mkdir(); (tx.path / 'exefs/main').write_bytes(b'main')
+        (tx.path / 'aoc/1').mkdir(parents=True); (tx.path / 'aoc/1/data').write_bytes(b'dlc')
+        tx.commit()
+        seen = {}; real = self.store._copy_tree
+        def spy(source, dest, *a, hardlink=False, **k):
+            seen[Path(source).name] = hardlink
+            return real(source, dest, *a, hardlink=hardlink, **k)
+        with patch.object(self.store, '_copy_tree', side_effect=spy):
+            self.store.begin('原创', 'next').abort()
+        self.assertEqual(seen, {'aoc': True, 'exefs': False})
+        src = self.home / 'aoc-src'
+        (src / '1/sub').mkdir(parents=True); (src / '2').mkdir()
+        files = {'a.bin': b'A' * 3, '1/b.bin': b'B' * 5, '1/sub/c.bin': b'C' * 7}
+        for rel, data in files.items():
+            (src / rel).write_bytes(data)
+        nt = _Os('nt')
+        posix_link = patch.object(roots, 'is_link', lambda p: Path(p).is_symlink())   # 只把硬链接这一步看成 Windows；判链接照本机
+        with patch.object(roots, 'os', nt), posix_link, patch.object(roots, 'copy_file', side_effect=AssertionError('copied')):
+            self.store._copy_tree(src, self.home / 'linked', hardlink=True)
+        for rel in files:
+            self.assertTrue(os.path.samefile(src / rel, self.home / 'linked' / rel), rel)
+        self.assertTrue((self.home / 'linked/2').is_dir())
+        nt.link = Mock(side_effect=OSError(errno.EPERM, 'no hard links on this volume'))
+        err = io.StringIO()
+        with patch.object(roots, 'os', nt), posix_link, patch.object(roots, 'refs_same_volume', return_value=False), \
+             patch.object(roots, 'copy_file', wraps=roots.copy_file) as copied, contextlib.redirect_stderr(err):
+            self.store._copy_tree(src, self.home / 'copied', hardlink=True)
+        self.assertEqual(copied.call_count, 3)
+        self.assertEqual(nt.link.call_count, 1)
+        self.assertIn('硬链接不可用', err.getvalue())
+        for rel, data in files.items():
+            self.assertEqual((self.home / 'copied' / rel).read_bytes(), data)
+            self.assertFalse(os.path.samefile(src / rel, self.home / 'copied' / rel))
+
     def test_realcopy_warns_and_bytes_match(self):
         src = self.home / 'source'
         dst = self.home / 'dest'
