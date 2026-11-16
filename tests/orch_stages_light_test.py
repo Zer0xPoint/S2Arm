@@ -346,6 +346,56 @@ class LightTest(unittest.TestCase):
         self.assertEqual((self.source / 'romfs/b').read_bytes(), b'bb')
         self.assertEqual((current / 'romfs/b').read_bytes(), b'bb')
 
+    def test_seed_romfs_image_and_clone(self):
+        # RomFS 镜像 romfs.std（标准 RomFS，与 romfs/ 同级）。期望按夹具手写：源只有镜像 → 现行有逐字节相同的 romfs.std、没有 romfs、存储里没有身份，
+        #   源原样还在（move_romfs 也不搬走镜像）；开工 / 提交的新版本镜像字节不变；Windows NTFS（refs 判否）上版本间是同一个文件（硬链接）；
+        #   再播目录形态 → 旧镜像删掉、romfs 回来
+        src = self.home / 'ex'; (src / 'exefs').mkdir(parents=True); (src / 'exefs/main').write_bytes(b'm')
+        blob = os.urandom(70001); (src / 'romfs.std').write_bytes(blob); (src / 'unpack.tsv').write_text('title_id\t0100aaaa00000000\n')
+        with patch.dict(os.environ, {'S2A_DUAL': '0'}):
+            cur = refresh.seed(self.store, '原创', src, move_romfs=True)
+        self.assertEqual((cur / 'romfs.std').read_bytes(), blob)
+        self.assertFalse(os.path.lexists(cur / 'romfs'))
+        self.assertEqual((src / 'romfs.std').read_bytes(), blob)
+        self.assertEqual(list((self.home / 'roots/.romfs_store').glob('原创/*')), [])
+        with patch.object(roots.sys, 'platform', 'win32'), patch.object(roots, 'refs_same_volume', return_value=False):
+            tx = self.store.begin('原创', 'after-image')
+            self.assertTrue(os.path.samefile(cur / 'romfs.std', tx.path / 'romfs.std'), 'NTFS：版本间硬链接同一份镜像，不实拷')
+        nxt = tx.commit()
+        self.assertEqual((nxt / 'romfs.std').read_bytes(), blob)
+        back = self.home / 'ex2'; (back / 'exefs').mkdir(parents=True); (back / 'exefs/main').write_bytes(b'm')
+        (back / 'romfs').mkdir(); (back / 'romfs/a').write_bytes(b'r')
+        with patch.dict(os.environ, {'S2A_DUAL': '0'}):
+            cur = refresh.seed(self.store, '原创', back)
+        self.assertFalse(os.path.lexists(cur / 'romfs.std'))
+        self.assertEqual((cur / 'romfs/a').read_bytes(), b'r')
+
+    @unittest.skipUnless(os.path.exists(os.path.expanduser('~/.dotnet/dotnet')) or __import__('shutil').which('dotnet'), '建标准 RomFS 镜像要 dotnet（services/romfs_index --std）')
+    def test_layout_on_image_only_root_writes_overlay_only(self):
+        # 产物根只有 RomFS 镜像 romfs.std（LibHac 从夹具目录建）。期望按夹具手写：覆盖层只有镜像里有的 Layout/one（= 覆盖包那份）、Layout/zz 镜像里没有 → 跳过；
+        #   清单只列 one；镜像逐字节不动、不建 romfs/
+        import shutil, subprocess
+        tree = self.home / 'tree'; (tree / 'Layout').mkdir(parents=True)
+        (tree / 'Layout/one').write_bytes(b'original one'); (tree / 'Layout/two').write_bytes(b'original two')
+        roots.remove_owned(self.source / 'romfs'); image = self.source / 'romfs.std'; image.write_bytes(b'')
+        env = dict(os.environ, DOTNET_ROOT=os.environ.get('DOTNET_ROOT', os.path.expanduser('~/.dotnet')))
+        env['PATH'] = env['DOTNET_ROOT'] + os.pathsep + env['PATH']
+        r = subprocess.run(['bash', str(stages.REPO / 'services/romfs_index.sh'), '--std', str(tree), '-', str(image), '0'], env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr[-300:])
+        blob = image.read_bytes()
+        refresh.seed(self.store, '原创', self.source)
+        overlay, _ = self._layout_cache()
+        (overlay / 'romfs/Layout/one').write_bytes(b'widen one'); (overlay / 'romfs/Layout/zz').write_bytes(b'not in image')
+        with contextlib.redirect_stderr(io.StringIO()):
+            stages.Stages(self.store).execute('原创', 'uilayout')
+        current = self.store.cur('原创')
+        got = sorted(p.relative_to(current / 'ui_overlay/romfs').as_posix() for p in (current / 'ui_overlay/romfs').rglob('*') if p.is_file())
+        self.assertEqual(got, ['Layout/one'])
+        self.assertEqual((current / 'ui_overlay/romfs/Layout/one').read_bytes(), b'widen one')
+        self.assertEqual((current / 'ui_overlay.tsv').read_bytes(), b'Layout/one\n')
+        self.assertEqual((current / 'romfs.std').read_bytes(), blob)
+        self.assertFalse(os.path.lexists(current / 'romfs'))
+
     def test_layout_rejects_persisted_traversal_before_transaction(self):
         refresh.seed(self.store, '原创', self.source)
         tx = self.store.begin('原创', self.store.tag('原创', 'unsafe-list'))

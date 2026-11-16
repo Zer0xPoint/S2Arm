@@ -29,6 +29,9 @@ from pack.jobs import filelock
 from graphics.nvn.tools import romfs_list
 
 REPO = Path(__file__).resolve().parents[2]
+# 产物根里的 RomFS 镜像（标准 RomFS，与 romfs/ 同级；graphics/nvn/tools/romfs_list.py image_of）：单个不可变文件，没有阶段原地改它（界面布局只写覆盖层），
+#   版本之间按 copy_file(link_ok=True) 共用同一份数据——克隆（APFS / ReFS / Linux 块克隆）或 Windows NTFS 同卷硬链接，不实拷十几 GB
+ROMFS_IMAGE = 'romfs.std'
 
 
 class UnsafeRoot(ValueError):
@@ -216,7 +219,7 @@ def links_supported(path):
 
 def copy_file(source, dest, link_ok=False):
     """克隆优先（Mac clonefile / Linux FICLONE / Windows ReFS 块克隆，写时复制）；都没有时实拷。
-    link_ok（#291，只给播种 RomFS 用）：Windows 上同卷非 ReFS（NTFS）先建硬链接，不逐文件实拷——RomFS 按设计不可变（没有阶段原地改它，
+    link_ok（#291，只给 RomFS 用：播种的 romfs/ 与各版本的镜像 romfs.std）：Windows 上同卷非 ReFS（NTFS）先建硬链接，不逐文件实拷——RomFS 按设计不可变（没有阶段原地改它，
     门禁机上还封成拒写），写单一 IMG 时边写边腾删的是产物根里的这个名字，共用解包目录里的那份数据不受影响。
     11-13 Windows NTFS 读数：18 万个文件的 RomFS 逐个实拷播种 1042 秒，8 万个的 433 秒。建不了（跨卷、FAT 类卷）照旧实拷"""
     source, dest = Path(source), Path(dest)
@@ -532,7 +535,7 @@ class Roots:
                             if p.is_dir():
                                 self._copy_tree(p.resolve(), tx.path / p.name)
                             else:
-                                copy_file(p, tx.path / p.name)
+                                copy_file(p, tx.path / p.name, link_ok=p.name == ROMFS_IMAGE)
                         tx.commit()
                     except BaseException as e:
                         cleanup_after(e, tx.abort)
@@ -632,7 +635,7 @@ class Roots:
             elif p.is_dir():
                 self._copy_tree(p, dest / p.name)
             else:
-                copy_file(p, dest / p.name)
+                copy_file(p, dest / p.name, link_ok=p.name == ROMFS_IMAGE)
         if not own_romfs and (dest / 'romfs').is_dir() and not target and sealing():
             seal(dest / 'romfs')
         self._resource('--root-clone', source, dest, env=env)

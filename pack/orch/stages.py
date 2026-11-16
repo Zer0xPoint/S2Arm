@@ -187,15 +187,32 @@ def romfs_walk(path):
     return module('graphics/nvn/tools/romfs_list.py', '_orch_romfs_list').walk(path)
 
 
+def _own_romfs_list():
+    """本文件所在仓库的 graphics/nvn/tools/romfs_list.py（不随单测换掉的 REPO），进程内只载一次"""
+    lister = sys.modules.get('_orch_layout_romfs_list')
+    if lister is None:
+        spec = importlib.util.spec_from_file_location('_orch_layout_romfs_list', Path(__file__).resolve().parents[2] / 'graphics/nvn/tools/romfs_list.py')
+        lister = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lister)
+        sys.modules['_orch_layout_romfs_list'] = lister
+    return lister
+
+
+def romfs_file(top):
+    """RomFS 里按相对路径（/ 分隔）取单个文件 → (在不在, 读全部字节)。目录不在、旁边有 <top>.std（标准 RomFS 镜像）就从镜像取
+    （graphics/nvn/tools/romfs_list.py image_of 的约定）；目录在照旧按路径取，不盘点整棵。取本文件所在仓库的 romfs_list（同 layout_source_identity，不随单测换掉的 REPO）"""
+    lister = _own_romfs_list()
+    image = lister.image_of(top)
+    if image is None:
+        return (lambda rel: (Path(top) / rel).is_file()), (lambda rel: (Path(top) / rel).read_bytes())
+    im = lister._romfs_image(image)   # romfs_list 找 pack/romfs_img.py 的同一条路（随 Jobs 拷出去时与它同目录）
+    return (lambda rel: rel in im), im.read
+
+
 def layout_source_identity(original):
     """布局覆盖包的原版身份（审计 #1534 P1-54，同 pack/stage_uilayout.sh）：原版 Layout / UI / Pack 的盘点身份（romfs_list：相对路径 + 大小 + 修改时间纳秒，只 lstat）
     合成 12 位，进覆盖包目录名；原版变了构建号没变也重新生成。取本文件所在仓库的 romfs_list（不随单测换掉的 REPO）"""
-    walker = sys.modules.get('_orch_layout_romfs_list')
-    if walker is None:
-        spec = importlib.util.spec_from_file_location('_orch_layout_romfs_list', Path(__file__).resolve().parents[2] / 'graphics/nvn/tools/romfs_list.py')
-        walker = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(walker)
-        sys.modules['_orch_layout_romfs_list'] = walker
+    walker = _own_romfs_list()
     h = hashlib.sha256()
     for name in ('Layout', 'UI', 'Pack'):
         if (Path(original) / name).is_dir():
@@ -755,7 +772,7 @@ class Stages:
     def _uilayout(self, game):
         start = time.perf_counter()
         current = self._light_current(game)
-        if not (current / 'romfs').is_dir():
+        if not (current / 'romfs').is_dir() and not (current / 'romfs.std').is_file():   # RomFS 是目录或镜像 romfs.std 都行：本阶段不写 RomFS
             return self._result('uilayout', start, current, None, skipped=True)
         # 原版：seed.txt 记的解包目录 romfs——它在、而且是这一款的（unpack.tsv 程序号对得上）才用（旧格式版本就地改过 RomFS 时靠它还原，见下面 restore）；
         #   否则用现行产物根的 romfs：本阶段只写覆盖层，Windows 别的阶段也不改 romfs，它一直联到播种时那份不可变的身份。
@@ -767,7 +784,8 @@ class Stages:
         if original is None or not original.is_dir() or (theirs and ours and theirs != ours):
             print(f'【黄】布局原版改用现行产物根的 RomFS（seed.txt 记的解包目录{"是另一款 " + theirs + " 的" if theirs and ours and theirs != ours else "不在或已失效"}）', file=sys.stderr)
             original = current / 'romfs'
-        plain_entries(original)
+        if original.is_dir():   # 散文件目录要核没有链接 / 特殊文件；镜像 romfs.std 里只有文件和目录，没有可核的
+            plain_entries(original)
         generator = REPO / 'graphics/widen/scan/ui_lyt.py'
         # Current repository import closure, including both on-demand C codecs.
         # Decoder fixes must invalidate overlays as well as the stage stamp.
@@ -826,18 +844,23 @@ class Stages:
         try:
             base = tx.path / 'romfs'
             previous = [self._layout_name(p) for p in read(tx.path / 'ui_overlay.tsv').splitlines() if p]
-            missing = {p for p in set(files + previous) if not (original / p).is_file() or not (base / p).is_file()}
+            (in_original, read_original), (in_base, read_base) = romfs_file(original), romfs_file(base)
+            missing = {p for p in set(files + previous) if not in_original(p) or not in_base(p)}
             if missing:
                 print(f'【黄】布局原版/现行没有{len(missing)}项，只许替换、跳过', file=sys.stderr)
             files = [p for p in files if p not in missing]
             # 上一版覆盖过、这一版不覆盖的：底下 RomFS 若不是原版（旧格式版本就地改过 RomFS）就把原版放进覆盖层；清单记覆盖层里的全部文件，下一版照样核
-            restore = [p for p in sorted(set(previous) - set(files) - missing) if (base / p).read_bytes() != (original / p).read_bytes()]
+            restore = [p for p in sorted(set(previous) - set(files) - missing) if read_base(p) != read_original(p)]
             layer = tx.path / 'ui_overlay'
             remove_owned(layer)
-            for name, source in [(p, overlay / 'romfs' / p) for p in files] + [(p, original / p) for p in restore]:
+            for name in files + restore:
                 target = layer / 'romfs' / name
                 target.parent.mkdir(parents=True, exist_ok=True)
-                copy_file(source, target)
+                source = overlay / 'romfs' / name if name in files else original / name
+                if source.is_file():
+                    copy_file(source, target)
+                else:   # 原版是镜像 romfs.std（romfs_file）：没有散文件可克隆，按字节写
+                    target.write_bytes(read_original(name))
             text(tx.path / 'ui_overlay.tsv', ''.join(p + '\n' for p in sorted(set(files) | set(restore), key=lambda p: p.encode('utf-8'))))
             text(tx.path / '.stage_uilayout', key + '\n')
             (tx.path / '.stage_romfsidx').unlink(missing_ok=True)

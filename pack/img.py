@@ -327,7 +327,7 @@ def _is_junction(path):
 def free_clones(root, keep, pack_dir, work=None):
     """边写边删之前（#746）：和这次读的 RomFS（keep）共享数据块的其余各份都删掉，只留 keep 这一份——APFS 克隆 / 硬链要所有份都删了才真腾出空间。
     各份都在这款的出包工作目录里，从产物根自己的记录找，不按路径猜：
-      产物根各版本里是真目录的 romfs（链接不占空间，留着）、RomFS 共享存储（roots/.romfs_store/<款>/）里别的身份、seed.txt 记的解包目录 src/romfs、
+      产物根各版本里是真目录的 romfs（链接不占空间，留着）、RomFS 共享存储（roots/.romfs_store/<款>/）里别的身份、seed.txt 记的解包目录 src/romfs、各版本与解包目录里的 RomFS 镜像 romfs.std（单个文件，keep 本身也可以是它）、
       资源包清单里的 RomFS 行（Mac 是克隆、Windows 是另一份拷贝；本来写完 IMG 就删）和旧形态库内镜像 romfs.files。
     出包收尾本来就清掉整个出包工作目录（pack/jobs/library.py prune_build），这里只是提前；写到一半失败由调用方清掉整个工作目录、下次重新解包。
     work：这款的出包工作目录（作业层传 build/ios）。删的每一份都必须在它里面——玩家导入的原件（NSP / XCI，包括外接盘上只读引用的）、
@@ -337,10 +337,11 @@ def free_clones(root, keep, pack_dir, work=None):
     work = os.path.realpath(work or os.path.dirname(roots_dir))
     def inside(p): return os.path.realpath(p).startswith(work + os.sep)
     def other(p): r = os.path.realpath(p); return r != keep and not keep.startswith(r + os.sep) and inside(p)
+    def drop_image(p):   # RomFS 镜像 romfs.std（单个文件，各版本间是克隆 / 硬链接，同一族）：别的名字都删了，这一份的块才真腾出来
+        if os.path.isfile(p) and not os.path.islink(p) and other(p): os.unlink(p)
     for v in romfs_list.listdir(roots_dir):
         rf = os.path.join(roots_dir, v, 'romfs')
-        sf = rf + '.std'   # 镜像形态（RomFS 不落散文件）：各版本里是真文件的 romfs.std 同理
-        if not v.startswith('.') and os.path.isfile(sf) and not os.path.islink(sf) and other(sf): os.unlink(sf)
+        if not v.startswith('.'): drop_image(rf + '.std')   # 镜像形态（RomFS 不落散文件）：各版本里是真文件的 romfs.std 同理
         if v.startswith('.') or os.path.islink(rf) or _is_junction(rf) or not os.path.isdir(rf): continue
         if other(rf): drop_tree(rf)
     store = os.path.join(roots_dir, '.romfs_store')
@@ -354,6 +355,7 @@ def free_clones(root, keep, pack_dir, work=None):
     if src:
         s = os.path.join(src, 'romfs')
         if os.path.lexists(s) and not os.path.islink(s) and not _is_junction(s) and other(s): drop_tree(s)
+        drop_image(s + '.std')
     if not inside(pack_dir): return   # 资源包不在工作目录里（只可能是手工调用）：不碰
     for rel, _ in pack_rows(pack_dir):
         if rel.startswith(SKIP) and not rel.startswith(KEEP):
