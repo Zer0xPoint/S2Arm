@@ -294,6 +294,29 @@ class RootsTest(unittest.TestCase):
             self.assertEqual(judge.call_count, 1)
         self.assertEqual((self.home / 'single2').read_bytes(), b'AAA')
 
+    def test_shared_tree_written_in_place_is_refused_at_commit(self):
+        # 11-16 总指挥：硬链接的前提「aoc/ 只许整目录替换、不许原地改」要有守护。期望手写：
+        #   ① 阶段原地改 aoc/d1/a.bin → 提交报冲突、点名 aoc/d1/a.bin，现行不变；② 整目录换掉 aoc/（aoc 阶段那条路）→ 正常提交、内容是新的；
+        #   ③ 不动 aoc/、只改别处 → 正常提交
+        first = self.seed()
+        tx = self.store.begin('原创', 'aoc0')
+        (tx.path / 'aoc' / 'd1').mkdir(parents=True); (tx.path / 'aoc/d1/a.bin').write_bytes(b'dlc a'); (tx.path / 'aoc/b.bin').write_bytes(b'dlc b')
+        base = tx.commit()
+        tx = self.store.begin('原创', 'aoc1')
+        (tx.path / 'aoc/d1/a.bin').write_bytes(b'dlc a changed in place')
+        with self.assertRaises(roots.Conflict) as cm:
+            tx.commit()
+        self.assertIn('aoc/d1/a.bin', str(cm.exception).replace(os.sep, '/'))
+        self.assertEqual((self.store.cur('原创'), (base / 'aoc/d1/a.bin').read_bytes()), (base, b'dlc a'))
+        tx = self.store.begin('原创', 'aoc2')
+        roots.remove_owned(tx.path / 'aoc'); (tx.path / 'aoc').mkdir(); (tx.path / 'aoc/c.bin').write_bytes(b'dlc c')
+        two = tx.commit()
+        self.assertEqual(sorted(p.name for p in (two / 'aoc').iterdir()), ['c.bin'])
+        tx = self.store.begin('原创', 'aoc3')
+        (tx.path / 'exefs/main').write_bytes(b'new main')
+        self.assertEqual((tx.commit() / 'aoc/c.bin').read_bytes(), b'dlc c')
+        self.assertNotEqual(first, two)
+
     def test_shared_trees_hardlinked_on_windows_and_fall_back_to_copy(self):
         # 11-16 出包轻阶段：追加内容（aoc）各版本共用、不原地改，阶段事务克隆现行时 Windows 上逐个建硬链接，不逐个块克隆。
         #   期望手写：① 阶段事务克隆现行：aoc 走硬链接、exefs 不走；② Windows 下硬链接树：每个文件与源同一个文件、空目录照建、不调 copy_file；

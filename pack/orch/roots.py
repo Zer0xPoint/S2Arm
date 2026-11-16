@@ -456,6 +456,29 @@ def process_start(pid):
 SHARED_TREES = ('aoc',)
 
 
+def shared_print(root):
+    """SHARED_TREES 各棵的指纹：{树名: (树目录 inode, {相对路径: (大小, 修改时间 ns)})}；没有这棵 = 不记。
+    守护「只许整目录替换、不许原地改」（硬链接的前提，11-16 总指挥）：Transaction 开始时记一份，提交时树目录没换（inode 相同）就要逐项相同，
+    不同 = 有阶段原地写了共用数据（硬链接下会连带改坏别的版本与缓存），当场报冲突、不提交。逐层 scandir，7000 来个文件约 0.1 秒"""
+    out = {}
+    for name in SHARED_TREES:
+        top = Path(root) / name
+        if not top.is_dir() or is_link(top):
+            continue
+        files, stack = {}, [top]
+        while stack:
+            d = stack.pop()
+            with os.scandir(d) as it:
+                for e in it:
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append(Path(e.path))
+                    else:
+                        st = e.stat(follow_symlinks=False)
+                        files[os.path.relpath(e.path, top)] = (st.st_size, st.st_mtime_ns)
+        out[name] = (top.stat().st_ino, files)
+    return out
+
+
 class Roots:
     def __init__(self, path=None, *, shared=None, repo=REPO):
         run = Path(os.environ.get('S2A_RUN_ROOT', Path.home() / '.s2arm/run')) / 's2arm'
@@ -705,7 +728,9 @@ class Roots:
             text(dest / '.root_pid', f'{os.getpid()} {process_start(os.getpid())}\n')
             stages = sorted(current.glob('.stage_*')) if current else ()
             text(dest / '.root_base_stages', ''.join(f'{p.name}\t{read(p)}\n' for p in stages if p.is_file()))
-            return Transaction(self, game, tag, dest, env=env)
+            tx = Transaction(self, game, tag, dest, env=env)
+            tx.shared = shared_print(dest)
+            return tx
         except BaseException as e:
             cleanup_after(e, remove_owned, dest)
             raise
@@ -788,6 +813,7 @@ class Transaction:
         self.roots, self.game, self.tag, self.path = roots, game, tag, path
         self.closed = False
         self.env = env
+        self.shared = {}   # begin 记的 SHARED_TREES 指纹（shared_print）；提交时核
 
     def abort(self):
         if not self.closed:
@@ -869,6 +895,11 @@ class Transaction:
                         raise Conflict('更新 main 已改过本阶段；共享现行不回退')
                     self._replay(current, tuple(replay))
                 roots._validate(self.path, self.game)
+                now_shared = shared_print(self.path)
+                for name, (ino, files) in self.shared.items():
+                    if name in now_shared and now_shared[name][0] == ino and now_shared[name][1] != files:   # 树目录没换却变了：原地改了共用数据
+                        diff = sorted(set(files.items()) ^ set(now_shared[name][1].items()))
+                        raise Conflict(f'原地改了共用数据 {name}/{diff[0][0]}（{name}/ 只许整目录替换，roots.SHARED_TREES；硬链接下会连带改坏别的版本）')
                 roots._intern(self.path, self.game)
                 if roots.plain:
                     final = self._activate_plain(current)
