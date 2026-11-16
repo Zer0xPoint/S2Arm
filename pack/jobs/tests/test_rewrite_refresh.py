@@ -3,6 +3,7 @@
 """只重跑改写阶段（pack/jobs/rewrite_refresh.py）的接线：改写器换成按模块打统计行的假程序，游戏库换成内存里的 game.json。
 真改写器上的读数（11-11）：路易吉洋馆 3 命中 main、换进的产物等于改写器直接输出；两款反例 kit 一个字节不动；改写器崩的款抛错、kit 不动。"""
 import os
+import shutil
 import stat
 import tempfile
 import types
@@ -34,7 +35,7 @@ class RewriteRefreshTests(unittest.TestCase):
         self.info = {}
         self.events = []
         self.sg_calls = []
-        self.c = types.SimpleNamespace(private=self.tmp, emit=lambda kind, text, **_: self.events.append(text),
+        self.c = types.SimpleNamespace(private=self.tmp, emit=lambda kind, text, **_: self.events.append(text), library=self.tmp / "library", work_root=self.tmp / "work",
                                        catalog=lambda: {"games": [{"id": g} for g in ("0100A", "0100B")]})
 
     def kit(self, gid):
@@ -269,7 +270,7 @@ class KeptNroRefreshTests(unittest.TestCase):
         import hashlib
         self.tmp = Path(tempfile.mkdtemp())
         self.events = []
-        self.c = types.SimpleNamespace(private=self.tmp, engine=Path(__file__).resolve().parents[3], env=lambda: dict(os.environ),
+        self.c = types.SimpleNamespace(private=self.tmp, engine=Path(__file__).resolve().parents[3], env=lambda: dict(os.environ), library=self.tmp / "library", work_root=self.tmp / "work",
                                        emit=lambda kind, text, **_: self.events.append(text), catalog=lambda: {"games": [{"id": "0100A"}]})
         self.kept = self.tmp / "kept"; self.kept.mkdir()
         self.nro = synthetic_nro(7); self.sha = hashlib.sha256(self.nro).hexdigest()
@@ -383,7 +384,7 @@ class OriginalExefsFormatTests(unittest.TestCase):
             (out / "main.npdm").write_bytes(jobcase.synthetic_npdm(int(self.TID, 16)))
 
         self.c = types.SimpleNamespace(
-            private=self.tmp, library=self.tmp / "library", engine=self.engine,
+            private=self.tmp, library=self.tmp / "library", work_root=self.tmp / "work", engine=self.engine,
             keys=self.tmp / "prod.keys", env=lambda: dict(os.environ), run=run,
         )
         self.c.keys.write_text("synthetic")
@@ -400,12 +401,17 @@ class OriginalExefsFormatTests(unittest.TestCase):
              patch.object(rr.layout, "image_mac", return_value=self.tmp / "no-mac"), \
              patch.object(rr.layout, "path", return_value=self.saved), \
              patch.object(rr.layout, "program_exefs", return_value=self.saved), \
+             patch("programs.save_exefs", side_effect=self._save_exefs), \
              patch.object(library, "selected_packages", return_value=rows):
             return rr.original_exefs(self.c, self.game, self.tmp / "work")
 
     def package(self, source, fmt, kind="base", version=0):
         return {"type": kind, "version": version, "format": fmt, "path": str(source),
                 "titleId": self.TID if kind == "base" else f"{int(self.TID, 16) | 0x800:016X}"}
+
+    def _save_exefs(self, c, gid, src):   # 常驻归档（pack/jobs/programs.py）另有单测；这里只核原件格式解出的 exefs 存的是哪一份
+        shutil.rmtree(self.saved, ignore_errors=True); shutil.copytree(src, self.saved)
+        return self.saved
 
     def assert_saved(self, source_main):
         result = self.original()

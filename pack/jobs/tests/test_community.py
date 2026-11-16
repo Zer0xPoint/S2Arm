@@ -19,6 +19,7 @@ REPO = Path(__file__).resolve().parents[3]
 class Ctx:
     def __init__(self, root):
         self.library, self.engine, self.private, self.r = root / "lib", root / "engine", root / "priv", {"gameId": GID}
+        self.work_root = root / "work"   # 程序缓存 cache/programs（pack/jobs/programs.py）
         table = self.engine / community.SETTINGS_TABLE   # 定义表用仓库里的真表
         table.parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(REPO / community.SETTINGS_TABLE, table)
     def begin(self, *a): pass

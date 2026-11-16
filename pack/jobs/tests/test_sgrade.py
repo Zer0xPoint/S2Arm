@@ -2,6 +2,7 @@
 # Copyright 2026 S2Arm contributors
 """S 级优化升级（pack/jobs/sgrade.py，v0.4.0）：原始程序存一份 / 按顺序找 / 升级前查找的分组 / Mac 逐款补。游戏库换成临时目录，期望手写"""
 import contextlib
+import shutil
 import tempfile
 import types
 import unittest
@@ -39,6 +40,9 @@ class SGradeTests(unittest.TestCase):
                   patch.object(layout, "image_mac", side_effect=lambda c, g, create=True: game_path(c, g, "image", "mac")),
                   patch.object(layout, "ios_kit", side_effect=lambda c, g: game_path(c, g, "image", "ios", "kit")),
                   patch.object(layout, "program_exefs", side_effect=lambda c, g: game_path(c, g, "original-exefs")),
+                  patch.object(layout, "has_ios_kit", side_effect=lambda c, g: (game_path(c, g, "image", "ios", "kit") / "main.npdm").is_file()),
+                  patch("programs.save_exefs", side_effect=lambda c, g, src: (shutil.rmtree(game_path(c, g, "original-exefs"), ignore_errors=True),
+                                                                               shutil.copytree(src, game_path(c, g, "original-exefs")))[1]),   # 常驻归档另有单测（test_programs_store）
                   patch.object(layout, "game_info", side_effect=lambda c, g: self.info.get(g.upper(), {})),
                   patch.object(build, "extract_valid", return_value=False)):
             p.start(); self.addCleanup(p.stop)

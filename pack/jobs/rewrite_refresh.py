@@ -34,7 +34,7 @@ import layout
 from core import Failure
 
 MODULE = re.compile(r"(main|sdk|subsdk[0-9])")
-SGRADE_TABLES = ("cpatch.tsv",)   # 随包表（runtime/src/cpatch.c 读）；另有 cheat-src.*（金手指原文随包）
+SGRADE_TABLES = ("cpatch.tsv", "cpatch_rows.tsv", "cpatch_excluded.tsv")   # 随包表（runtime/src/cpatch.c 读 cpatch.tsv）+ 改写用的补丁行表：一起换，kit 里的配方才与产物一致（按配方现建 kit 要用它，11-16）；另有 cheat-src.*（金手指原文随包）
 OUTPUTS = ("patched.bin", "fixups.tsv", "gates.tsv", "sites.tsv", "gaps.tsv", "widen.tsv", "code_patch.tsv")
 AFFECTED = re.compile(r"'x18_spdyn':\s*(\d+)")
 
@@ -501,7 +501,11 @@ def refresh_ios(c, games):
     """组容器前：这几款的 iPhone 容器件按本引擎改写器核一遍（见文件头），再补缺的可读瓦片版着色器（pack/jobs/sgrade_bf.py）。→ 换了改写产物 / 资源包的款"""
     if not games:
         return []
-    return sorted(set(_refresh_code_ios(c, games)) | set(_refresh_bf_ios(c, games)))
+    changed = sorted(set(_refresh_code_ios(c, games)) | set(_refresh_bf_ios(c, games)))
+    import programs
+    for g in changed:   # kit 改过（补进的表、运行时收回的模块）：常驻配方跟着重存（pack/jobs/programs.py），之后按配方现建的 kit 与这份一致
+        programs.save_recipe(c, g)
+    return changed
 
 
 def _refresh_bf_ios(c, games):

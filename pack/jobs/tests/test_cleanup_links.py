@@ -86,7 +86,9 @@ class CleanupLinkTests(unittest.TestCase):
         library.save_container_kit(self.c, self.gid, root)
         library.prune_build(self.c, self.gid)
         self.assertEqual(sorted(p.name for p in image.iterdir()), ["pack"])   # 资源包在 image/ios，不动
-        self.assertTrue((layout.program_store(self.c, self.gid) / "kit" / "main.npdm").is_file())   # 程序件在专用文件夹，不动
+        import programs
+        self.assertTrue((layout.program_store(self.c, self.gid) / "recipe.tar.zst").is_file())   # 程序件的配方在程序常驻，不动
+        self.assertTrue((programs.cache(self.c, self.gid) / "kit" / "main.npdm").is_file())   # 程序件在程序缓存（不在出包工作目录 build/），出包收尾不清
         self.assertEqual(sorted(p.relative_to(unpacked).as_posix() for p in unpacked.rglob("*")), ["ios", "ios/logs", "ios/logs/refresh.log"])   # 解包、产物根、work 清掉，出包日志留
 
     def test_without_kit_prune_keeps_current_root(self):

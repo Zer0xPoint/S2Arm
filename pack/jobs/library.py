@@ -2262,15 +2262,16 @@ CONTAINER_KIT = layout.IOS_KIT   # 每款 .programs/<程序号>/kit（11-16 起�
 def save_container_kit(c, gid, root, dest=None):
     """把组装容器要读的文件（ship_ext.place_game / display_name / 随包表：顶层普通文件、ctl/control.nacp、programs/<n>/）存成不依赖产物根的副本。
     root 里的链接按内容拷，之后删产物根、RomFS 存储、Windows 的 work/ 都不影响装机、续签和单壳追加。没有 main.npdm 返回 None，不动旧的。
-    dest 给了（迁移旧布局时）就存成 dest/container-kit，否则存到游戏程序专用文件夹（layout.program_store）的 kit。"""
+    dest 给了（迁移旧布局时）就存成 dest/container-kit，否则存到程序缓存的 kit、并存常驻配方（pack/jobs/programs.py）。"""
     root = Path(root)
     if not (root / "main.npdm").is_file():
         return None
-    out = Path(dest) if dest else layout.program_store(c, gid, create=True)
+    import programs as progs   # 本函数下面另有局部变量 programs（产物根的 programs/ 目录）
+    out = Path(dest) if dest else progs.cache(c, gid)
     out.mkdir(parents=True, exist_ok=True)
     name = "container-kit" if dest else CONTAINER_KIT
     kit, temporary = out / name, out / (name + ".partial")
-    managed = c.library
+    managed = c.library if dest else c.work_root
     if temporary.exists():
         _rm(c, managed, temporary)
     def copy_files(source, dest):
@@ -2290,9 +2291,12 @@ def save_container_kit(c, gid, root, dest=None):
     if kit.exists():
         _rm(c, managed, kit)
     os.replace(temporary, kit)
-    legacy = layout.image_ios(c, gid, create=False) / CONTAINER_KIT
-    if not dest and legacy.is_dir():   # 游戏文件夹里旧位置的那份已被这次新存的取代
-        _rm(c, layout.root_of(c, gid), legacy)
+    if not dest:
+        progs.save_recipe(c, gid)   # 常驻配方（原始程序在常驻里的模块，改写产物不存、现建）
+        for legacy, root in ((layout.image_ios(c, gid, create=False) / CONTAINER_KIT, layout.root_of(c, gid)),
+                             (layout.program_store(c, gid) / CONTAINER_KIT, c.library)):
+            if legacy.is_dir():   # 旧位置的那份已被这次新存的取代
+                _rm(c, root, legacy)
     return kit
 
 
@@ -2309,7 +2313,7 @@ def _build_entries(c, gid):
 
 def _residue_disposable(c, gid):
     """解包和中间产物能不能删：有容器件，或这款没有已出好的 IPA。老玩家有 IPA 没容器件时，现行产物根是装机的唯一来源，留给「旧版残留」项先存容器件再删。"""
-    return (layout.ios_kit(c, gid) / "main.npdm").is_file() or not (layout.ios_pack(c, gid) / "manifest.json").is_file()
+    return layout.has_ios_kit(c, gid) or not (layout.ios_pack(c, gid) / "manifest.json").is_file()
 
 
 def _keep_stage_logs(c, gid):
@@ -2510,11 +2514,12 @@ def delete(c):
             if moved:
                 trashed.append((c.work_root, moved))
         drop_from_container(c, gid)
-        programs = layout.program_store(c, gid)   # 删除游戏 = 从库里删掉、也从各台手机记录摘掉：这款的程序专用文件夹一并删
-        if programs.exists():
-            moved = _to_trash(c, c.library, programs, gid)
-            if moved:
-                trashed.append((c.library, moved))
+        import programs as progs   # 删除游戏 = 从库里删掉、也从各台手机记录摘掉：这款的程序常驻与缓存一并删
+        for root, d in ((c.library, layout.program_store(c, gid)), (c.work_root, progs.cache(c, gid))):
+            if d.exists():
+                moved = _to_trash(c, root, d, gid)
+                if moved:
+                    trashed.append((root, moved))
         cat = c.catalog()
         cat["games"] = [g for g in cat["games"] if g["id"] != gid]
         atomic(c.library / "catalog.json", cat)
@@ -2623,9 +2628,9 @@ SPACE_KEPT = ("saves", "logs")
 def iphone_ready(c, gid):
     """这款的 iPhone 版能不能装（catalog 每款都问，只看几个文件，不逐文件读）：容器件主程序表 main.npdm 在且非空、有改写产物，资源包清单在。
     审计 P2-212：原先只看「有 ipa + 有资源包目录」，容器件缺 main.npdm 也报就绪，点装机才报错；逐文件完整核对仍在装机组装时（pack/ship_ext.py check_root / place_game）"""
-    kit, pack = layout.ios_kit(c, gid), layout.ios_pack(c, gid)
-    try:
-        return (kit / "main.npdm").stat().st_size > 0 and any(kit.glob("*.fixups.tsv")) and (pack / "manifest.json").is_file()
+    pack = layout.ios_pack(c, gid)
+    try:   # 程序件只问「有没有」（缓存 kit 或常驻配方），不现建：游戏库清单每款都问，现建要跑改写器
+        return layout.has_ios_kit(c, gid) and (pack / "manifest.json").is_file()
     except OSError:
         return False
 
@@ -2648,7 +2653,7 @@ def space_parts(c, gid):
     gdir = layout.find_game(c, gid)
     parts = {
         "legacy": _build_entries(c, gid),   # 不含出包日志（下面 logs 项，只报不删）
-        "shaders": [p for p in game_caches(c, gid) if p not in shared],
+        "shaders": [p for p in game_caches(c, gid) if p not in shared] + [Path(c.work_root) / "cache" / "programs" / gid.upper()],   # 程序缓存：缺了按常驻配方现建（pack/jobs/programs.py）；出包收尾不清它
         "mac": [layout.image_mac(c, gid, create=False)] if gdir and gdir.exists() else [],
         "ipa": ipa,
         "saves": [layout.path(c, gid, "saves", create=False)],
@@ -2765,7 +2770,7 @@ def space_free(c):
         if "legacy" in want:   # 老玩家的现行产物根是装机的唯一来源：删之前先存成容器件，否则装机会报 container_stale
             from ipa import product_root
             root = product_root(c, gid)
-            if root is not None and not (layout.ios_kit(c, gid) / "main.npdm").is_file():
+            if root is not None and not layout.has_ios_kit(c, gid):
                 save_container_kit(c, gid, root)
         parts = space_parts(c, gid)
         # 腾出多少按删前的组合账算（同 space_survey 的合计）：逐项「删前 − 删后」会把共用克隆块记在最后删的那项上、单项又各算一遍

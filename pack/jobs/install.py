@@ -614,7 +614,7 @@ def classify(text, default="signing_failed"):
 
 def ios_pack(c, gid):
     """这款的资源包（image/ios/.pack）；还没出 iPhone 版 / 没有资源包就不装、不报成功（审计 18:00 P1-58：原先照装、启动器写死「资源包也拷好了」，打开游戏才进缺资源页）"""
-    if not (layout.ios_kit(c, gid) / "main.npdm").is_file():
+    if not layout.has_ios_kit(c, gid):
         raise Failure("这款游戏还没出 iPhone 包：先点「打 iPhone 包」。", code="job_failed")
     pack = layout.ios_pack(c, gid)
     if not (pack / "manifest.json").is_file():
@@ -1307,7 +1307,7 @@ def export_phone(c, gid=None):
         if g == gid or g in hidden:
             continue
         pack = layout.ios_pack(c, g)
-        if not (layout.ios_kit(c, g) / "main.npdm").is_file() or not (pack / "manifest.json").is_file():
+        if not layout.has_ios_kit(c, g) or not (pack / "manifest.json").is_file():
             continue   # 没出过 iPhone 版：本来就不在手机上，不算跳过
         if packer.usable_kit(c, g, sid) is None or not img_pack(pack):
             skipped.append(names[g])

@@ -701,7 +701,7 @@ def assemble(c, gid, others=(), *, failed=(), root=None, dest=None, agreed=None)
         roots[g] = usable_kit(c, g, sid, failed)
         if roots[g] is None:
             stale.append(names.get(g, g))
-            if not (layout.ios_kit(c, g) / "main.npdm").is_file():
+            if not layout.has_ios_kit(c, g):
                 missing.add(g)
     stale_ids = [g for g in roots if roots[g] is None]
     agreed = {a.upper() for a in ((agreed or {}).get(sid) or [])}

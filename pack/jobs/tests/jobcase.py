@@ -336,11 +336,12 @@ def synthetic_nacp(title, display):   # 0x4000 字节：ApplicationTitle[0] 名�
 
 
 def ios_fixture(c, gid, *, shell="SID1", pack="cafe01", compat=None, fixups=True):
-    """游戏库结构 v3 里一款出好的 iPhone 版：游戏程序专用文件夹 .programs/<程序号>/kit（容器件：main.npdm + 改写产物表）+ 这款文件夹 image/ios/.pack（资源包，清单带 index_sha256），
+    """游戏库结构 v3 里一款出好的 iPhone 版：程序缓存 cache/programs/<程序号>/kit（容器件：main.npdm + 改写产物表；常驻配方见 pack/jobs/programs.py）+ 这款文件夹 image/ios/.pack（资源包，清单带 index_sha256），
     game.json 的 ios 记出它的壳号、资源包号（compat 给了再记 hostAbi / dmshChain）→ (kit, pack)"""
     import layout
     image = layout.image_ios(c, gid)
-    kit, pk = layout.program_store(c, gid, create=True) / "kit", image / ".pack"
+    import programs
+    kit, pk = programs.cache(c, gid) / "kit", image / ".pack"
     kit.mkdir(parents=True, exist_ok=True)
     (kit / "main.npdm").write_bytes(b"META")
     if fixups:

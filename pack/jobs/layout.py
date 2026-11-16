@@ -435,10 +435,10 @@ def image_ios(c, gid, create=True):
     return path(c, gid, "image", "ios", create=create)
 
 
-# ---- 游戏程序专用文件夹（11-16 维护者：玩家打完包常删输出目录、之后不碰电脑，更新 S2Arm 时组容器要的游戏程序跟着丢了）----
-# 默认位置根 .programs/<程序号>/：kit/（组容器的程序件）、original-exefs/（原始程序，S 级升级用，sgrade.py）、ios.json（程序件的兼容记录，同 game.json 的 ios）。
-#   按程序号分、不在游戏文件夹里：删游戏文件夹、换存放位置删旧位置、「释放空间」都不碰它；只有「删除游戏」（library.delete：从库里删掉、也从各台手机记录摘掉）才删。
-#   旧库的 image/ios/kit、original-exefs 第一次用到时搬过来（同卷改名，跨卷拷后删）。一款约 56–238 MB（11-16 常驻库 14 款实测合计 1971 MB）
+# ---- 游戏程序常驻（11-16 维护者：玩家打完包常删输出目录、之后不碰电脑，更新 S2Arm 时组容器要的游戏程序跟着丢了；又定「极致压缩」）----
+# 默认位置根 .programs/<程序号>/：exefs.tar.zst（原始程序）、recipe.tar.zst（配方）、ios.json（程序件的兼容记录，同 game.json 的 ios）。
+#   按程序号分、不在游戏文件夹里：删游戏文件夹、换存放位置删旧位置、「释放空间」都不碰它；只有「删除游戏」（library.delete）才删。
+#   kit 与解开的原始程序是缓存（工具缓存 cache/programs/<程序号>），缺了按配方现建：见 pack/jobs/programs.py
 PROGRAMS, PROGRAM_INFO, PROGRAM_EXEFS = ".programs", "ios.json", "original-exefs"
 
 
@@ -450,25 +450,31 @@ def program_store(c, gid, create=False):
     return d
 
 
-def _adopt(c, gid, name, legacy):
-    """专用文件夹里还没有 name、游戏文件夹里的旧位置 legacy 有 → 搬过来；搬不动（盘只读 / 被占用）就先用旧位置，下次再搬"""
-    new = program_store(c, gid) / name
-    if os.path.lexists(new) or not os.path.isdir(legacy):
-        return new
-    try:
-        program_store(c, gid, create=True)
-        _move_any(legacy, new)
-    except OSError:
-        return legacy
-    return new
-
-
 def ios_kit(c, gid):
-    return _adopt(c, gid, IOS_KIT, image_ios(c, gid, create=False) / IOS_KIT)
+    """iPhone 程序件（组容器读）：缓存在就用、缺了按常驻配方现建（programs.kit_dir）；只问「有没有」用 has_ios_kit（不现建）"""
+    import programs
+    return programs.kit_dir(c, gid)
+
+
+def has_ios_kit(c, gid):
+    """有没有 iPhone 程序件（游戏库清单每款都问：只看文件，不迁移、不现建——旧布局的迁移要压缩 + 现建对拍，留到真用程序件时做）"""
+    import programs
+    if programs.has_kit(c, gid):
+        return True
+    for kit in (program_store(c, gid) / IOS_KIT, image_ios(c, gid, create=False) / IOS_KIT):   # 还没迁移的旧布局
+        try:
+            if (kit / "main.npdm").stat().st_size > 0 and any(kit.glob("*.fixups.tsv")):
+                return True
+        except OSError:
+            pass
+    return False
 
 
 def program_exefs(c, gid):
-    return _adopt(c, gid, PROGRAM_EXEFS, path(c, gid, PROGRAM_EXEFS, create=False))
+    """解开的原始程序目录（缓存，缺了从常驻归档解）；没有 → 不存在的路径"""
+    import programs
+    programs.adopt(c, gid)
+    return programs.exefs_dir(c, gid) or programs.cache(c, gid) / "exefs"
 
 
 def program_info(c, gid):

@@ -1937,8 +1937,10 @@ class JobsTests(unittest.TestCase):
         library.prune_build(self.c, game["id"])
         self.assertEqual([f for f in keep + other if not f.exists()], [])
         self.assertEqual([f for f in gone if f.exists()], [])
-        # 有了容器件（游戏程序专用文件夹 .programs/<程序号>/kit）：现行产物根也不用留，build/ 只剩出包日志 build/ios/logs
-        kit = layout.program_store(self.c, game["id"], create=True) / "kit" / "main.npdm"; kit.parent.mkdir(parents=True); kit.write_bytes(b"META")
+        # 有了容器件（程序缓存 cache/programs/<程序号>/kit，pack/jobs/programs.py）：现行产物根也不用留，build/ 只剩出包日志 build/ios/logs
+        import programs
+        kit = programs.cache(self.c, game["id"]) / "kit" / "main.npdm"; kit.parent.mkdir(parents=True); kit.write_bytes(b"META")
+        (kit.parent / "main.fixups.tsv").write_text("")
         library.prune_build(self.c, game["id"])
         build = layout.build_dir(self.c, game["id"], create=False)
         self.assertEqual(sorted(str(q.relative_to(build)) for q in build.rglob("*")), ["ios", "ios/logs", "ios/logs/a.log"])
@@ -2755,7 +2757,7 @@ class JobsTests(unittest.TestCase):
         (out / "logs").mkdir(); (out / "logs" / "oneclick.log").write_text("出包日志")
         image = layout.image_ios(self.c, gid)   # 上一次成功出包的交付件
         if ipa: (image / ".pack").mkdir(parents=True); (image / ".pack" / "manifest.json").write_text('{"index_sha256": "p"}')
-        if kit: (image / "kit").mkdir(parents=True); (image / "kit" / "main.npdm").write_bytes(b"old")
+        if kit: (image / "kit").mkdir(parents=True); (image / "kit" / "main.npdm").write_bytes(b"old"); (image / "kit" / "main.fixups.tsv").write_text("")
         image = layout.path(self.c, gid, "image"); (image / "mac").mkdir(parents=True); (image / "mac.partial").mkdir()   # 出了一半的新镜像
         save = layout.path(self.c, gid, "saves") / "s.bin"; save.parent.mkdir(parents=True); save.write_bytes(b"save")
         return gid, out, save
@@ -2768,11 +2770,10 @@ class JobsTests(unittest.TestCase):
         c = self.stop_context(gid)
         library.clean_after_stop(c)
         image = layout.image_ios(self.c, gid)
-        self.assertEqual(sorted(p.name for p in image.iterdir()), [".pack"])
-        self.assertTrue((layout.ios_kit(self.c, gid) / "main.npdm").is_file())   # 程序件在专用文件夹，照样留着
+        self.assertEqual(sorted(p.name for p in image.iterdir()), [".pack", "kit"])   # 旧位置的程序件：清理不碰，真用到时才搬进程序常驻（pack/jobs/programs.py adopt）
         self.assertEqual(sorted(p.name for p in layout.build_dir(self.c, gid).iterdir()), ["ios"])   # 只剩出包日志
         self.assertEqual(sorted(p.name for p in out.iterdir()), ["logs"])
-        self.assertEqual((layout.ios_kit(self.c, gid) / "main.npdm").read_bytes(), b"old")   # 旧位置的程序件已搬进专用文件夹，内容不变
+        self.assertEqual((image / "kit" / "main.npdm").read_bytes(), b"old")
         self.assertEqual(save.read_bytes(), b"save")
         self.assertEqual((c.logs / (c.task + "-stages") / "stage.log").read_text(), "阶段日志")
 

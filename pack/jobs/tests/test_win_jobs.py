@@ -321,7 +321,7 @@ class WinInstall(unittest.TestCase):
         self.gid = "0100000000000047"
         self.progress_events = []   # 作业计数事件 (done, total, unit)
         emit = lambda *a, **k: self.progress_events.append((k.get("done"), k.get("total"), k.get("unit"))) if k.get("unit") else None
-        self.c = types.SimpleNamespace(r={"gameId": self.gid}, library=self.t / "lib", private=self.t, logs=self.t / "logs", task="k", engine=self.t, emit=emit,
+        self.c = types.SimpleNamespace(r={"gameId": self.gid}, library=self.t / "lib", work_root=self.t / "work", private=self.t, logs=self.t / "logs", task="k", engine=self.t, emit=emit,
                                        begin=lambda *a, **k: None, last_log=None, catalog=lambda: {"schema": 1, "games": []},
                                        lock=lambda *a, **k: contextlib.nullcontext())   # 装机类作业的手机锁 / 程序锁（ipa.phone_lock / program_locks）
         ios_fixture(self.c, self.gid)   # 出好的 iPhone 版：image/ios/kit + image/ios/pack

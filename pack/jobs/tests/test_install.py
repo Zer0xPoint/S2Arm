@@ -367,7 +367,7 @@ class FlowTests(unittest.TestCase):
     def test_container_missing_pack_refuses_before_install(self):
         gid = "0100000000010000"
         # 有容器件但没有资源包（image/ios/pack）：ios_pack 拒绝，不走到找设备 / 组装
-        kit = layout.image_ios(self.c, gid) / "kit"; kit.mkdir(parents=True); (kit / "main.npdm").write_bytes(b"META")
+        kit = layout.image_ios(self.c, gid) / "kit"; kit.mkdir(parents=True); (kit / "main.npdm").write_bytes(b"META"); (kit / "main.fixups.tsv").write_text("")
         self.c.r.update(gameId=gid)
         with um.patch.object(install, "phone_for", side_effect=AssertionError("不该走到找设备")):
             with self.assertRaises(Failure) as e: install.install(self.c)
